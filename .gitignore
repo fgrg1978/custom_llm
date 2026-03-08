@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# Datos generados (pesados, se regeneran con prepare)
+domains/*/data/games.pgn
+domains/*/data/games.pgn.zst
+domains/*/data/sequences.pt
+data/games.pgn
+data/games.pgn.zst
+data/sequences.pt
+
+# Checkpoints (modelos entrenados, se regeneran)
+checkpoints/
+domains/*/checkpoints/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
