@@ -34,8 +34,6 @@ data/games.pgn.zst
 data/sequences.pt
 
 # Checkpoints (modelos entrenados, se regeneran)
-checkpoints/
-domains/*/checkpoints/
 
 # Jupyter
 .ipynb_checkpoints/

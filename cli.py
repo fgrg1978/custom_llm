@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--n-heads", type=int, default=4)
     parser.add_argument("--n-layers", type=int, default=4)
+    parser.add_argument("--patience", type=int, default=5,
+                        help="Early stopping: stop if val_loss does not improve for N epochs")
     parser.add_argument("--color", choices=["white", "black"], default="white")
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--games", type=int, default=10)
@@ -66,6 +68,7 @@ def run_chess(args):
             d_model=args.d_model,
             n_heads=args.n_heads,
             n_layers=args.n_layers,
+            patience=args.patience,
         )
 
     elif args.action == "play":

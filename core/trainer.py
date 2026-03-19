@@ -31,6 +31,7 @@ def train(
     n_heads=4,
     n_layers=4,
     max_len=256,
+    patience=5,
 ):
     device = get_device()
     print(f"Dispositivo: {device}")
@@ -72,6 +73,9 @@ def train(
 
     os.makedirs(checkpoints_dir, exist_ok=True)
     best_val_loss = float("inf")
+    epochs_without_improvement = 0
+
+    print(f"Early stopping: patience={patience} (para si val_loss no mejora en {patience} epochs)")
 
     for epoch in range(epochs):
         # Train
@@ -104,11 +108,12 @@ def train(
 
         val_loss /= len(val_loader)
 
-        print(f"Epoch {epoch+1}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}")
+        print(f"Epoch {epoch+1}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}", end="")
 
         # Guardar mejor modelo
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            epochs_without_improvement = 0
             checkpoint = {
                 "model_state": model.state_dict(),
                 "vocab_size": vocab_size,
@@ -121,6 +126,13 @@ def train(
             }
             path = os.path.join(checkpoints_dir, "best_model.pt")
             torch.save(checkpoint, path)
-            print(f"  -> Mejor modelo guardado (val_loss={val_loss:.4f})")
+            print(f"  -> BEST (saved)")
+        else:
+            epochs_without_improvement += 1
+            print(f"  (no improvement {epochs_without_improvement}/{patience})")
 
-    print(f"\nEntrenamiento completado. Mejor val_loss: {best_val_loss:.4f}")
+            if epochs_without_improvement >= patience:
+                print(f"\nEarly stopping at epoch {epoch+1}. val_loss did not improve for {patience} epochs.")
+                break
+
+    print(f"\nTraining complete. Best val_loss: {best_val_loss:.4f}")

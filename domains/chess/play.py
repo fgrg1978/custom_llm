@@ -32,19 +32,34 @@ def get_model_path(selftrained=False, rlhf=False):
 
 
 def predict_chess_move(model, token_ids, token_to_id, id_to_token, board, device, temperature=0.8):
-    """Genera el siguiente movimiento de ajedrez."""
+    """Genera el siguiente movimiento de ajedrez, evitando repeticiones."""
     legal_moves = list(board.legal_moves)
     legal_sans = [board.san(m) for m in legal_moves]
 
     legal_ids = set()
+    san_to_id = {}
     for san in legal_sans:
         if san in token_to_id:
-            legal_ids.add(token_to_id[san])
+            tid = token_to_id[san]
+            legal_ids.add(tid)
+            san_to_id[san] = tid
 
     if not legal_ids:
         return random.choice(legal_moves)
 
-    token_id = predict_next_token(model, token_ids, legal_ids, device, temperature)
+    # Check if a move would cause threefold repetition and exclude it
+    non_repeating_ids = set()
+    for san, tid in san_to_id.items():
+        move = board.parse_san(san)
+        board.push(move)
+        if not board.can_claim_threefold_repetition():
+            non_repeating_ids.add(tid)
+        board.pop()
+
+    # Use non-repeating moves if available, otherwise allow all
+    valid_ids = non_repeating_ids if non_repeating_ids else legal_ids
+
+    token_id = predict_next_token(model, token_ids, valid_ids, device, temperature)
     san = id_to_token[token_id]
     return board.parse_san(san)
 
