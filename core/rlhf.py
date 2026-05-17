@@ -1,6 +1,10 @@
 """
-RLHF generico: fine-tune con policy gradient.
-Cada dominio provee su propio evaluador y loop de interaccion.
+RLHF with REINFORCE (inspired by Karpathy's nanochat).
+
+Key improvements over basic policy gradient:
+1. Multiple samples per position (generate N candidates, keep best)
+2. Advantage normalization (reward - mean)
+3. On-policy (fresh data each training step)
 """
 
 import torch
@@ -10,43 +14,67 @@ from torch.utils.data import DataLoader, Dataset
 
 
 class RLHFDataset(Dataset):
-    """Dataset con rewards para RLHF."""
+    """Dataset with advantages for REINFORCE."""
 
     def __init__(self, experiences, max_len=256):
         """
-        experiences: lista de (token_ids_hasta_aqui, token_jugado, reward)
+        experiences: list of (token_ids, target_id, advantage)
         """
         self.data = []
-        for token_ids, target_id, reward in experiences:
+        for token_ids, target_id, advantage in experiences:
             if len(token_ids) >= max_len - 1:
                 token_ids = token_ids[-(max_len - 1):]
             x = token_ids + [0] * (max_len - 1 - len(token_ids))
-            self.data.append((x, target_id, reward))
+            self.data.append((x, target_id, advantage))
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        x, target, reward = self.data[idx]
+        x, target, advantage = self.data[idx]
         return (
             torch.tensor(x, dtype=torch.long),
             torch.tensor(target, dtype=torch.long),
-            torch.tensor(reward, dtype=torch.float),
+            torch.tensor(advantage, dtype=torch.float),
         )
+
+
+def normalize_rewards(experiences):
+    """
+    Convert raw rewards to advantages: advantage = reward - mean.
+    Like Karpathy's nanochat: centers rewards so the model learns
+    what's BETTER than average, not just what's good/bad.
+    """
+    if not experiences:
+        return experiences
+
+    rewards = [r for _, _, r in experiences]
+    mean_reward = sum(rewards) / len(rewards)
+
+    normalized = []
+    for token_ids, target_id, reward in experiences:
+        advantage = reward - mean_reward
+        normalized.append((token_ids, target_id, advantage))
+
+    return normalized
 
 
 def rlhf_train(model, experiences, vocab_size, device, lr=5e-5, epochs=3):
     """
-    Fine-tune con policy gradient simplificado.
+    REINFORCE with advantage normalization.
 
-    Loss = -reward * log(probabilidad del token)
+    Loss = -advantage * log(prob of chosen token)
 
-    - reward positivo: AUMENTA la probabilidad (refuerza)
-    - reward negativo: DISMINUYE la probabilidad (penaliza)
+    - advantage > 0: move was BETTER than average → increase probability
+    - advantage < 0: move was WORSE than average → decrease probability
+    - advantage = 0: average move → no change
     """
     if not experiences:
-        print("  Sin experiencias para entrenar.")
+        print("  No experiences to train on.")
         return model
+
+    # Normalize rewards to advantages
+    experiences = normalize_rewards(experiences)
 
     dataset = RLHFDataset(experiences)
     loader = DataLoader(dataset, batch_size=32, shuffle=True)
@@ -56,10 +84,10 @@ def rlhf_train(model, experiences, vocab_size, device, lr=5e-5, epochs=3):
 
     for epoch in range(epochs):
         total_loss = 0
-        for x, target, reward in loader:
+        for x, target, advantage in loader:
             x = x.to(device)
             target = target.to(device)
-            reward = reward.to(device)
+            advantage = advantage.to(device)
 
             logits = model(x)
             last_logits = logits[:, -1, :]
@@ -67,7 +95,8 @@ def rlhf_train(model, experiences, vocab_size, device, lr=5e-5, epochs=3):
             log_probs = F.log_softmax(last_logits, dim=-1)
             action_log_probs = log_probs.gather(1, target.unsqueeze(1)).squeeze(1)
 
-            loss = -(reward * action_log_probs).mean()
+            # REINFORCE: -advantage * log_prob
+            loss = -(advantage * action_log_probs).mean()
 
             optimizer.zero_grad()
             loss.backward()

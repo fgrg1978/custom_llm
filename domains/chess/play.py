@@ -8,6 +8,9 @@ import random
 
 from core.dataset import BOS_TOKEN
 from core.generator import load_model, predict_next_token
+from domains.chess.tokenizer import ELO_BUCKETS
+
+INFERENCE_ELO_BUCKET = ELO_BUCKETS[-2][1]  # <ELO_2200>
 from domains.chess.ui import render_board, get_human_move
 
 DOMAIN_DIR = os.path.dirname(__file__)
@@ -76,6 +79,8 @@ def play(color="white", temperature=0.8, selftrained=False, rlhf=False):
     board = chess.Board()
     human_white = (color == "white")
     token_ids = [token_to_id[BOS_TOKEN]]
+    if INFERENCE_ELO_BUCKET in token_to_id:
+        token_ids.append(token_to_id[INFERENCE_ELO_BUCKET])
 
     print(f"\n{'='*40}")
     print(f"  AJEDREZ - Tu juegas con {'BLANCAS' if human_white else 'NEGRAS'}")

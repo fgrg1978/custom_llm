@@ -1,0 +1,5 @@
+torch==2.5.1
+chess==1.11.2
+tqdm==4.67.3
+zstandard==0.25.0
+numpy==2.0.2

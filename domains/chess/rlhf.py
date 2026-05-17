@@ -1,16 +1,22 @@
 """
-RLHF para ajedrez: feedback manual o automatico (Stockfish).
+RLHF for chess: manual or automatic feedback (Stockfish).
+
+Inspired by Karpathy's nanochat REINFORCE:
+- Multiple samples per position (try N moves, compare rewards)
+- Advantage normalization (reward - mean)
+- On-policy (fresh games each round)
 """
 
 import os
 import chess
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from core.dataset import BOS_TOKEN
-from core.generator import load_model
+from core.generator import load_model, predict_next_token
 from core.rlhf import rlhf_train
-from domains.chess.play import predict_chess_move, get_model_path
+from domains.chess.play import predict_chess_move, get_model_path, INFERENCE_ELO_BUCKET
 from domains.chess.evaluator import StockfishEvaluator, HeuristicEvaluator, find_stockfish
 from domains.chess.ui import render_board, get_human_move
 
@@ -19,18 +25,74 @@ DATA_DIR = os.path.join(DOMAIN_DIR, "data")
 CHECKPOINTS_DIR = os.path.join(DOMAIN_DIR, "checkpoints")
 
 
+def sample_multiple_moves(model, token_ids, token_to_id, id_to_token, board, evaluator, device, num_samples=8, temperature=1.0):
+    """
+    Generate N candidate moves for a position, evaluate each with Stockfish.
+    Returns list of (token_ids, chosen_token_id, reward) for each sample.
+
+    This is the key improvement from nanochat: instead of evaluating 1 move,
+    we try N moves and learn which ones are better than average.
+    """
+    legal_moves = list(board.legal_moves)
+    legal_sans = [board.san(m) for m in legal_moves]
+
+    legal_ids = set()
+    for san in legal_sans:
+        if san in token_to_id:
+            legal_ids.add(token_to_id[san])
+
+    if not legal_ids:
+        return []
+
+    # Generate N samples from the model's distribution
+    x = torch.tensor([token_ids], dtype=torch.long, device=device)
+    with torch.no_grad():
+        logits = model(x)
+    next_logits = logits[0, -1, :]
+
+    # Mask illegal moves
+    mask = torch.full_like(next_logits, float("-inf"))
+    for lid in legal_ids:
+        mask[lid] = 0
+    next_logits = next_logits + mask
+
+    probs = F.softmax(next_logits / temperature, dim=-1)
+
+    # Sample N moves (with replacement — same move can appear multiple times)
+    num_samples = min(num_samples, len(legal_ids))
+    sampled_ids = torch.multinomial(probs, num_samples, replacement=True)
+
+    # Evaluate each sampled move with Stockfish
+    experiences = []
+    board_before = board.copy()
+
+    for token_id in sampled_ids.tolist():
+        san = id_to_token[token_id]
+        move = board.parse_san(san)
+
+        board.push(move)
+        reward = evaluator.get_reward(board_before, board)
+        board.pop()
+
+        experiences.append((list(token_ids), token_id, reward))
+
+    return experiences
+
+
 def play_with_feedback_manual(model, token_to_id, id_to_token, device, human_color="black", temperature=0.8):
-    """Partida interactiva con feedback humano."""
+    """Interactive game with human feedback."""
     board = chess.Board()
     human_white = (human_color == "white")
     token_ids = [token_to_id[BOS_TOKEN]]
+    if INFERENCE_ELO_BUCKET in token_to_id:
+        token_ids.append(token_to_id[INFERENCE_ELO_BUCKET])
     experiences = []
 
     print(f"\n{'='*50}")
-    print(f"  RLHF - Feedback Manual")
-    print(f"  Tu juegas con {'BLANCAS' if human_white else 'NEGRAS'}")
-    print(f"  Despues de cada movimiento del LLM, califica:")
-    print(f"    [b] bueno  [m] malo  [enter] neutral")
+    print(f"  RLHF - Manual Feedback")
+    print(f"  You play {'WHITE' if human_white else 'BLACK'}")
+    print(f"  After each LLM move, rate it:")
+    print(f"    [b] good  [m] bad  [enter] neutral")
     print(f"{'='*50}")
 
     while not board.is_game_over():
@@ -38,7 +100,7 @@ def play_with_feedback_manual(model, token_to_id, id_to_token, device, human_col
 
         is_white_turn = board.turn == chess.WHITE
         is_human_turn = (human_white and is_white_turn) or (not human_white and not is_white_turn)
-        turn_label = "Blancas" if is_white_turn else "Negras"
+        turn_label = "White" if is_white_turn else "Black"
 
         if is_human_turn:
             move = get_human_move(board, turn_label)
@@ -48,15 +110,13 @@ def play_with_feedback_manual(model, token_to_id, id_to_token, device, human_col
         else:
             move = predict_chess_move(model, token_ids, token_to_id, id_to_token, board, device, temperature)
             san = board.san(move)
-            print(f"  [{turn_label}] LLM juega: {san}")
+            print(f"  [{turn_label}] LLM plays: {san}")
 
-            fb = input(f"  Califica [b]ueno / [m]alo / [enter] neutral: ").strip().lower()
+            fb = input(f"  Rate [b]good / [m]bad / [enter] neutral: ").strip().lower()
             if fb == "b":
                 reward = 1.0
-                print(f"  -> Reward: +1.0")
             elif fb == "m":
                 reward = -1.0
-                print(f"  -> Reward: -1.0")
             else:
                 reward = 0.0
 
@@ -69,7 +129,7 @@ def play_with_feedback_manual(model, token_to_id, id_to_token, device, human_col
 
     result = board.result()
     render_board(board, perspective_white=human_white)
-    print(f"\nResultado: {result}")
+    print(f"\nResult: {result}")
 
     llm_is_white = not human_white
     result_reward = 0
@@ -82,40 +142,55 @@ def play_with_feedback_manual(model, token_to_id, id_to_token, device, human_col
         for i in range(len(experiences)):
             tid, tar, rew = experiences[i]
             experiences[i] = (tid, tar, rew + result_reward)
-        print(f"  Bonus resultado ({result_reward:+.1f}) aplicado a {len(experiences)} movimientos")
 
     return experiences
 
 
-def play_with_feedback_auto(model, token_to_id, id_to_token, device, evaluator, temperature=0.8):
-    """Partida automatica donde evaluador da el feedback."""
+def play_with_feedback_auto(model, token_to_id, id_to_token, device, evaluator, num_samples=8, temperature=1.0):
+    """
+    Automatic game with multi-sample evaluation.
+    For each position, samples N moves and evaluates all of them.
+    """
     board = chess.Board()
     token_ids = [token_to_id[BOS_TOKEN]]
+    if INFERENCE_ELO_BUCKET in token_to_id:
+        token_ids.append(token_to_id[INFERENCE_ELO_BUCKET])
     experiences = []
+    moves_played = 0
 
-    while not board.is_game_over() and len(experiences) < 200:
-        board_before = board.copy()
+    while not board.is_game_over() and moves_played < 200:
+        # Sample multiple moves and evaluate each one
+        position_exps = sample_multiple_moves(
+            model, token_ids, token_to_id, id_to_token,
+            board, evaluator, device,
+            num_samples=num_samples, temperature=temperature,
+        )
+        experiences.extend(position_exps)
 
-        move = predict_chess_move(model, token_ids, token_to_id, id_to_token, board, device, temperature)
-        san = board.san(move)
+        # Actually play the best move (greedy for game progression)
+        if position_exps:
+            best_exp = max(position_exps, key=lambda e: e[2])
+            best_token_id = best_exp[1]
+            san = id_to_token[best_token_id]
+        else:
+            import random
+            move = random.choice(list(board.legal_moves))
+            san = board.san(move)
 
         if san in token_to_id:
-            board.push(move)
-            reward = evaluator.get_reward(board_before, board)
-            experiences.append((list(token_ids), token_to_id[san], reward))
             token_ids.append(token_to_id[san])
-        else:
-            board.push(move)
-            token_ids.append(0)
+        board.push(board.parse_san(san))
+        moves_played += 1
 
     result = board.result() if board.is_game_over() else "*"
 
+    # Result bonus
     for i in range(len(experiences)):
         tid, tar, rew = experiences[i]
         if result == "1-0":
-            bonus = 3.0 if i % 2 == 0 else -3.0
+            bonus = 2.0
         elif result == "0-1":
-            bonus = -3.0 if i % 2 == 0 else 3.0
+            bonus = -2.0
         else:
             bonus = 0
         experiences[i] = (tid, tar, rew + bonus)
@@ -123,8 +198,8 @@ def play_with_feedback_auto(model, token_to_id, id_to_token, device, evaluator, 
     return experiences, result
 
 
-def run_rlhf(feedback="auto", n_games=50, rounds=5, lr=5e-5, temperature=0.8, selftrained=False):
-    """Loop principal de RLHF."""
+def run_rlhf(feedback="auto", n_games=50, rounds=5, lr=5e-5, temperature=0.8, selftrained=False, num_samples=8):
+    """Main RLHF loop."""
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
     vocab_path = os.path.join(DATA_DIR, "vocab.json")
@@ -136,24 +211,25 @@ def run_rlhf(feedback="auto", n_games=50, rounds=5, lr=5e-5, temperature=0.8, se
     if feedback == "auto":
         if find_stockfish():
             evaluator = StockfishEvaluator(depth=10, time_limit=0.05)
-            print(f"Usando Stockfish")
+            print(f"Using Stockfish")
         else:
-            print("Stockfish no encontrado, usando heuristico.")
+            print("Stockfish not found, using heuristic.")
             evaluator = HeuristicEvaluator()
     elif feedback == "heuristic":
         evaluator = HeuristicEvaluator()
 
     print(f"\n{'='*50}")
-    print(f"  RLHF - {'Manual' if feedback == 'manual' else 'Automatico'}")
-    print(f"  Rondas: {rounds}, Partidas/ronda: {n_games}")
-    print(f"  Dispositivo: {device}")
+    print(f"  RLHF ({'Manual' if feedback == 'manual' else 'Automatic'})")
+    print(f"  Rounds: {rounds}, Games/round: {n_games}")
+    print(f"  Samples per position: {num_samples}")
+    print(f"  Device: {device}")
     print(f"{'='*50}\n")
 
     os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
 
     for round_num in range(1, rounds + 1):
         print(f"\n{'─'*50}")
-        print(f"RONDA {round_num}/{rounds}")
+        print(f"ROUND {round_num}/{rounds}")
         print(f"{'─'*50}")
 
         all_experiences = []
@@ -163,24 +239,26 @@ def run_rlhf(feedback="auto", n_games=50, rounds=5, lr=5e-5, temperature=0.8, se
             all_experiences.extend(exps)
         else:
             results = {}
-            for _ in tqdm(range(n_games), desc="Jugando"):
+            for _ in tqdm(range(n_games), desc="Playing"):
                 exps, result = play_with_feedback_auto(
-                    model, token_to_id, id_to_token, device, evaluator, temperature=temperature
+                    model, token_to_id, id_to_token, device, evaluator,
+                    num_samples=num_samples, temperature=temperature,
                 )
                 all_experiences.extend(exps)
                 results[result] = results.get(result, 0) + 1
-            print(f"  Resultados: {results}")
+            print(f"  Results: {results}")
 
         if all_experiences:
             rewards = [r for _, _, r in all_experiences]
             avg_reward = sum(rewards) / len(rewards)
             pos = sum(1 for r in rewards if r > 0)
             neg = sum(1 for r in rewards if r < 0)
-            print(f"  Experiencias: {len(all_experiences)}")
-            print(f"  Reward promedio: {avg_reward:.3f}")
-            print(f"  Positivos: {pos}, Negativos: {neg}")
+            print(f"  Experiences: {len(all_experiences)} ({num_samples}x per position)")
+            print(f"  Avg reward: {avg_reward:.3f}")
+            print(f"  Positive: {pos}, Negative: {neg}")
 
-        print(f"\n  Entrenando...")
+        # On-policy: train on this round's fresh data, then discard
+        print(f"\n  Training (REINFORCE with advantages)...")
         model = rlhf_train(model, all_experiences, vocab_size, device, lr=lr)
 
         checkpoint = {
@@ -191,11 +269,11 @@ def run_rlhf(feedback="auto", n_games=50, rounds=5, lr=5e-5, temperature=0.8, se
             "epoch": round_num, "val_loss": 0,
         }
         torch.save(checkpoint, os.path.join(CHECKPOINTS_DIR, "best_model_rlhf.pt"))
-        print(f"  Modelo guardado")
+        print(f"  Model saved")
 
     if evaluator:
         evaluator.close()
 
     print(f"\n{'='*50}")
-    print(f"  RLHF COMPLETADO")
+    print(f"  RLHF COMPLETE")
     print(f"{'='*50}")

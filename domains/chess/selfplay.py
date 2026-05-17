@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from core.dataset import BOS_TOKEN, EOS_TOKEN, SequenceDataset
 from core.generator import load_model, predict_next_token
-from domains.chess.play import predict_chess_move, get_model_path
+from domains.chess.play import predict_chess_move, get_model_path, INFERENCE_ELO_BUCKET
 from domains.chess.tokenizer import RESULT_MAP
 from domains.chess.ui import render_board
 
@@ -24,6 +24,8 @@ def selfplay_game(model, token_to_id, id_to_token, device, temperature=0.8, max_
     """Una partida completa LLM vs LLM."""
     board = chess.Board()
     token_ids = [token_to_id[BOS_TOKEN]]
+    if INFERENCE_ELO_BUCKET in token_to_id:
+        token_ids.append(token_to_id[INFERENCE_ELO_BUCKET])
     moves_played = []
 
     while not board.is_game_over() and len(moves_played) < max_moves:

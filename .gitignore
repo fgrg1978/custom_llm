@@ -25,18 +25,27 @@ env/
 .claude/
 CLAUDE.md
 
-# Datos generados (pesados, se regeneran con prepare)
+# Datos generados (pesados, se regeneran con prepare/distill)
 domains/*/data/games.pgn
 domains/*/data/games.pgn.zst
 domains/*/data/sequences.pt
+domains/*/data/sequences_*.pt
 data/games.pgn
 data/games.pgn.zst
 data/sequences.pt
 
 # Checkpoints (modelos entrenados, se regeneran)
+domains/*/checkpoints/RESULT.txt
+
+# Project docs not tracked in git
+ROADMAP.md
+THINKING_PLAN.md
 
 # Jupyter
 .ipynb_checkpoints/
 
 # Logs
 *.log
+
+# Experiment run artifacts (keep README/FAILED, drop individual run dirs)
+experiments/*/

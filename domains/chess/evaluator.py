@@ -12,11 +12,16 @@ STOCKFISH_PATHS = [
     "/opt/homebrew/bin/stockfish",
     "/usr/local/bin/stockfish",
     "/usr/bin/stockfish",
+    "/usr/games/stockfish",   # ubicacion por defecto de apt en Ubuntu/Debian
 ]
 
 
 def find_stockfish():
-    """Busca el binario de Stockfish."""
+    """Busca el binario de Stockfish: primero el PATH, luego rutas conocidas."""
+    import shutil
+    which = shutil.which("stockfish")
+    if which:
+        return which
     for path in STOCKFISH_PATHS:
         if os.path.exists(path):
             return path

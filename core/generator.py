@@ -49,6 +49,13 @@ def predict_next_token(model, token_ids, valid_token_ids, device, temperature=0.
     if not valid_token_ids:
         return None
 
+    # Ventana deslizante: el modelo solo maneja max_len posiciones (pos_emb).
+    # En partidas largas token_ids supera max_len -> hay que truncar a los
+    # ultimos max_len tokens, si no el embedding posicional peta (IndexError).
+    max_len = model.pos_emb.num_embeddings
+    if len(token_ids) > max_len:
+        token_ids = token_ids[-max_len:]
+
     x = torch.tensor([token_ids], dtype=torch.long, device=device)
     with torch.no_grad():
         logits = model(x)
